@@ -23,14 +23,17 @@ steps:
   - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
     with:
       persist-credentials: false
-  - uses: leandervedoy/QuantumTest@main
+  - uses: leandervedoy/QuantumTest@<reviewed-commit-sha>
     with:
       path: '.'
-      fail-on: high
-      output: vedoy-scan.sarif
+      fail-on: none
+      output: ${{ runner.temp }}/vedoy-scan.sarif
+      exclude: |
+        _vercel-static/*
+        assets/vendor/*
 ```
 
-Fest QuantumTest til en gjennomgått commit-SHA ved produksjonsbruk. Runneren må ha Python 3.10+ på PATH (ubuntu-latest har dette). SARIF kan lastes opp separat til GitHub Code Scanning der funksjonen er tilgjengelig; dette er ikke aktivert av denne workflowen.
+Fest QuantumTest til en gjennomgått commit-SHA ved produksjonsbruk. `fail-on: none` lar en pilot rapportere funn uten å blokkere CI; en faktisk kjøre-/konfigurasjonsfeil gir fortsatt exit 2. Runneren må ha Python 3.10+ på PATH (ubuntu-latest har dette). SARIF kan lastes opp separat til GitHub Code Scanning der funksjonen er tilgjengelig; dette er ikke aktivert av denne workflowen. Vurder rapporter og artefakttilgang før opplasting.
 
 ## Regler
 
@@ -45,8 +48,8 @@ Fest QuantumTest til en gjennomgått commit-SHA ved produksjonsbruk. Runneren m�
 | QT007 | Middels | Shell-kjøring |
 | QT008 | Middels | Potensielt utrygg deserialisering |
 
-Dette er mønsterbaserte indikasjoner som må gjennomgås manuelt. Skanneren gjør ingen dataflytanalyse, avhengighetsskanning eller nettverkstesting og garanterer ikke at kode er sikker. Kommentarer og strenger kan gi falske positiver. Den kjører aldri prosjektets kode og sender ingen data over nettverket. Rapporter inneholder filnavn, linjer og faste beskrivelser, aldri kildekode eller nøkkelverdier.
+Dette er mønsterbaserte indikasjoner som må gjennomgås manuelt. Skanneren gjør ingen dataflytanalyse, avhengighetsskanning eller nettverkstesting og garanterer ikke at kode er sikker. Kommentarer og strenger kan gi falske positiver. Den kjører aldri prosjektets kode og sender ingen data over nettverket. Rapporter inneholder filnavn, linjer og faste beskrivelser, aldri kildekodelinjer eller nøkkelverdier fra kildekoden. Filnavn som ligner kjente hemmeligheter eller inneholder kontrolltegn holdes utenfor rapporten; vilkårlige sensitive filnavn kan ikke gjenkjennes med full sikkerhet, så rapporten må behandles som potensielt sensitiv.
 
-`--exclude 'tests/*'` kan gjentas med rot-relative globmønstre. Vanlige bygge- og avhengighetsmapper hoppes over. Symlenker følges ikke. Filer over 1 MiB, binærfiler og ikke-UTF-8-filer hoppes over; JSON viser disse begrensningene i `skipped`. SARIF inneholder bare funn. Kun gjenkjente tekst-/kodefiltyper skannes. Ingen git-historikk skannes.
+`--exclude 'tests/*'` kan gjentas med rot-relative globmønstre. Actionens `exclude` tar ett mønster per linje. Vanlige bygge- og avhengighetsmapper hoppes over. Symlenker følges ikke. Filer over 1 MiB, binærfiler og ikke-UTF-8-filer hoppes over; JSON viser disse begrensningene i `skipped`. Utrygge filnavn holdes tilbake uten å vise stien. SARIF inneholder bare funn, så bruk JSON lokalt for å se utelatelser. Skanningen stopper med exit 2 ved mer enn 10 000 aktuelle filer, 128 MiB leste data, 5 000 treff eller 9 MiB rapport. Kun gjenkjente tekst-/kodefiltyper skannes. Ingen git-historikk skannes.
 
 Exit-koder: 0 = ingen funn på valgt terskel, 1 = terskel nådd, 2 = kjøre-/konfigurasjonsfeil. Standard er høy; `none` slår av feil på funn. Rapporter bør lagres utenfor kildekoden. Ingen automatisk endring eller retting av kode.
