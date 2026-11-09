@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from scanner.scan import main, sarif, scan
@@ -39,6 +41,46 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(main([d, '--output', out, '--fail-on', 'medium']), 1)
             self.assertEqual(main([d, '--output', out, '--fail-on', 'none']), 0)
             self.assertEqual(main([d + '/missing']), 2)
+
+    def test_sensitive_paths_and_errors_never_reach_reports_or_logs(self):
+        marker = 'synthetic-secret-0123456789ABCDEF'
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d, 'source')
+            root.mkdir()
+            (root / 'app.js').write_text('const password = "' + marker + '";\neval(input);')
+            (root / ('api_key=' + marker + '.js')).write_text('eval(input)')
+            (root / ('token=' + marker)).mkdir()
+            (root / ('token=' + marker) / 'app.js').write_text('eval(input)')
+            report = scan(root)
+            self.assertNotIn(marker, json.dumps(report))
+            self.assertNotIn(marker, json.dumps(sarif(report)))
+            self.assertEqual(len(report['findings']), 2)
+            self.assertTrue(any('path withheld' in item['reason'] for item in report['skipped']))
+            run = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'scanner' / 'scan.py'),
+                                  str(root / marker)], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 2)
+            self.assertNotIn(marker, run.stdout + run.stderr)
+
+    def test_symlinks_and_global_limits(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d, 'source')
+            root.mkdir()
+            outside = Path(d, 'outside.js')
+            outside.write_text('eval(input)')
+            (root / 'link.js').symlink_to(outside)
+            (root / 'a.js').write_text('eval(input)')
+            (root / 'b.js').write_text('eval(input)')
+            self.assertEqual([f['path'] for f in scan(root)['findings']], ['a.js', 'b.js'])
+            with self.assertRaisesRegex(ValueError, 'file limit'):
+                scan(root, max_files=2)
+            with self.assertRaisesRegex(ValueError, 'byte limit'):
+                scan(root, max_total_bytes=4)
+            with self.assertRaisesRegex(ValueError, 'finding limit'):
+                scan(root, max_findings=1)
+            linked = Path(d, 'linked-root')
+            linked.symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                scan(linked)
 
 
 if __name__ == '__main__':
