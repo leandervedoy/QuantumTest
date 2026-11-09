@@ -1,0 +1,26 @@
+name: Code scanner
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Test scanner
+        run: python3 -m unittest discover -s tests -v
+      - name: Scan repository
+        run: python3 scanner/scan.py . --exclude 'tests/*' --format sarif --output vedoy-scan.sarif
+      - name: Store report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: vedoy-code-scan
+          path: vedoy-scan.sarif
+          if-no-files-found: warn

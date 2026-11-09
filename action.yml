@@ -1,0 +1,23 @@
+name: Vedoy Code Scanner
+description: Read-only heuristic scanner producing redacted JSON or SARIF reports
+inputs:
+  path:
+    description: Directory to scan
+    default: '.'
+  fail-on:
+    description: 'Failure threshold: high, medium, low, none'
+    default: high
+  output:
+    description: Report file path
+    default: vedoy-scan.sarif
+runs:
+  using: composite
+  steps:
+    - name: Scan source files
+      shell: bash
+      env:
+        SCANNER_ROOT: ${{ github.action_path }}
+        SCAN_TARGET: ${{ inputs.path }}
+        SCAN_THRESHOLD: ${{ inputs.fail-on }}
+        SCAN_REPORT: ${{ inputs.output }}
+      run: python3 "$SCANNER_ROOT/scanner/scan.py" "$SCAN_TARGET" --format sarif --output "$SCAN_REPORT" --fail-on "$SCAN_THRESHOLD"
