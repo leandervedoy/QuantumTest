@@ -5,7 +5,9 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
+from urllib.parse import quote
 
 RULES = [
     ('QT001', 'high', r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----', 'Possible private key. Remove it and rotate the key.'),
@@ -21,15 +23,34 @@ COMPILED = [(i, s, re.compile(p), m) for i, s, p, m in RULES]
 EXCLUDED = {'.git', 'node_modules', '.venv', 'venv', '__pycache__', 'dist', 'build', 'coverage'}
 EXTENSIONS = {'.py', '.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.json', '.yaml', '.yml', '.env', '.pem', '.key', '.txt', '.sh', '.html', '.vs'}
 LEVELS = {'low': 0, 'medium': 1, 'high': 2, 'none': 3}
+MAX_FILES = 10000
+MAX_TOTAL_BYTES = 128 * 1048576
+MAX_FINDINGS = 5000
+MAX_REPORT_BYTES = 9 * 1048576
+# Filenames are untrusted input too. Never serialize paths that resemble credentials.
+SENSITIVE_PATH = re.compile(
+    r'(?i)(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}'
+    r'|AKIA[A-Z0-9]{16}|(?:api[_-]?key|api[_-]?secret|password|secret|token|credential)\s*[:=]'
+    r'|[A-Za-z0-9_-]{48,})'
+)
 
 
-def scan(root, excludes=(), max_bytes=1048576):
+def safe_path(relative):
+    return not SENSITIVE_PATH.search(relative) and not any(ord(char) < 32 for char in relative)
+
+
+def scan(root, excludes=(), max_bytes=1048576, max_files=MAX_FILES,
+         max_total_bytes=MAX_TOTAL_BYTES, max_findings=MAX_FINDINGS):
+    if Path(root).is_symlink():
+        raise ValueError('Scan path cannot be a symlink')
     root = Path(root).resolve(strict=True)
     if not root.is_dir():
         raise ValueError('Scan path must be a directory')
-    findings, skipped, scanned = [], [], 0
+    findings, skipped, scanned, considered, total_bytes = [], [], 0, 0, 0
     for directory, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = sorted(d for d in dirs if d not in EXCLUDED and not (Path(directory) / d).is_symlink())
+        dirs[:] = sorted(d for d in dirs if d not in EXCLUDED
+                         and not (Path(directory) / d).is_symlink()
+                         and safe_path((Path(directory) / d).relative_to(root).as_posix()))
         for name in sorted(files):
             path = Path(directory) / name
             relative = path.relative_to(root).as_posix()
@@ -37,12 +58,25 @@ def scan(root, excludes=(), max_bytes=1048576):
                 continue
             if path.suffix not in EXTENSIONS and not name.startswith('.env'):
                 continue
+            considered += 1
+            if considered > max_files:
+                raise ValueError('Scan file limit exceeded')
+            if not safe_path(relative):
+                skipped.append({'reason': 'sensitive or unsafe path (path withheld)'})
+                continue
             try:
                 if path.is_symlink():
                     skipped.append({'path': relative, 'reason': 'symlink'})
                     continue
-                with path.open('rb') as stream:
+                fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+                with os.fdopen(fd, 'rb') as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        skipped.append({'path': relative, 'reason': 'non-regular file'})
+                        continue
                     data = stream.read(max_bytes + 1)
+                total_bytes += len(data)
+                if total_bytes > max_total_bytes:
+                    raise ValueError('Scan byte limit exceeded')
                 if len(data) > max_bytes or b'\0' in data:
                     skipped.append({'path': relative, 'reason': 'oversized or binary'})
                     continue
@@ -54,6 +88,8 @@ def scan(root, excludes=(), max_bytes=1048576):
             for number, line in enumerate(source.splitlines(), 1):
                 for rule, severity, pattern, message in COMPILED:
                     if pattern.search(line):
+                        if len(findings) >= max_findings:
+                            raise ValueError('Scan finding limit exceeded')
                         findings.append({'rule': rule, 'severity': severity, 'path': relative, 'line': number, 'message': message})
     return {'tool': 'Vedoy Code Scanner', 'version': '0.1.0', 'scanned_files': scanned, 'skipped': skipped, 'findings': findings}
 
@@ -64,7 +100,7 @@ def sarif(report):
             {'id': i, 'shortDescription': {'text': m}} for i, _, _, m in RULES]}},
         'results': [{'ruleId': f['rule'], 'level': 'error' if f['severity'] == 'high' else 'warning',
                      'message': {'text': f['message']}, 'locations': [{'physicalLocation': {
-                         'artifactLocation': {'uri': __import__('urllib.parse', fromlist=['quote']).quote(f['path'], safe='/')},
+                         'artifactLocation': {'uri': quote(f['path'], safe='/')},
                          'region': {'startLine': f['line']}}}]} for f in report['findings']]}]}
 
 
@@ -85,13 +121,15 @@ def main(argv=None):
                 pass
         report = scan(args.path, excludes)
         result = json.dumps(sarif(report) if args.format == 'sarif' else report, indent=2) + '\n'
+        if len(result.encode('utf-8')) > MAX_REPORT_BYTES:
+            raise ValueError('Report size limit exceeded')
         if args.output:
             Path(args.output).write_text(result, encoding='utf-8')
         else:
             print(result, end='')
         return int(any(LEVELS[f['severity']] >= LEVELS[args.fail_on] for f in report['findings']))
-    except (OSError, ValueError) as error:
-        print(f'Scan failed: {error}', file=sys.stderr)
+    except (OSError, ValueError):
+        print('Scan failed: check the input path, permissions and scan limits.', file=sys.stderr)
         return 2
 
 
